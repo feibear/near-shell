@@ -41,6 +41,8 @@
     "nearlib": "^0.18.0",
     "open": "^7.0.0",
     "rimraf": "^3.0.0",
+    "stoppable": "^1.1.0",
+    "tcp-port-used": "^1.0.1",
     "update-notifier": "^3.0.1",
     "yargs": "^15.0.1"
   },

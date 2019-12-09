@@ -7,13 +7,14 @@ const readline = require('readline');
 const URL = require('url').URL;
 const chalk = require('chalk');  // colorize output
 const open = require('open');    // open URL in default browser
-const isCI = require('is-ci');   // honor CI server limitations
 
 const nearjs = require('nearlib');
-const { KeyPair, keyStores, utils } = require('nearlib');
-const UnencryptedFileSystemKeyStore = keyStores.UnencryptedFileSystemKeyStore;
+const { KeyPair, utils } = require('nearlib');
 
 const connect = require('./utils/connect');
+const verify = require('./utils/verify-account');
+const capture = require('./utils/capture-login-success');
+
 const inspectResponse = require('./utils/inspect-response');
 
 // TODO: Fix promisified wrappers to handle error properly
@@ -88,46 +89,64 @@ exports.login = async function(options) {
         newUrl.searchParams.set('title', title);
         const keyPair = await KeyPair.fromRandom('ed25519');
         newUrl.searchParams.set('public_key', keyPair.getPublicKey());
-        console.log(chalk`\n(Step 1) {bold.yellow Please authorize NEAR Shell} on at least one of your accounts then come back.`);
 
-        if(isCI || process.env.NEAR_DEBUG) {
-            console.log(newUrl.toString());
-        } else {
-            await open(newUrl.toString());
+        console.log(chalk`\n{bold.yellow Please authorize NEAR Shell} on at least one of your accounts.`);
+        console.log(chalk`\n{dim If your browser doesn't automatically open, please visit this URL\n${newUrl.toString()}}`);
+
+        // attempt to capture accountId automatically via browser callback
+        let tempUrl;
+        let accountId;
+
+        // find a callback URL on the local machine
+        try {
+            tempUrl = await capture.callback();
+        } catch (error) {
+            // console.error("Failed to find suitable port.", error.message)
+            // silent error is better here
         }
-        const rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout
-        });
-        rl.question(chalk`(Step 2) Which account did you just authorize for use with NEAR Shell?  {bold Enter it here:} `, async (accountId) => {
-            try {
-                // check that the key got added
-                const near = await connect(options);
-                let account = await near.account(accountId);
-                let keys = await account.getAccessKeys();
-                let publicKey = keyPair.getPublicKey().toString();
-                const short = (key) => `${key.substring(0,14)}...`; // keep the public key readable
 
-                let keyFound = keys.some(key => key.public_key == keyPair.getPublicKey().toString());
-                if (keyFound) {
-                    const keyStore = new UnencryptedFileSystemKeyStore('./neardev');
-                    await keyStore.setKey(options.networkId, accountId, keyPair);
-                    console.log(chalk`Logged in as [ {bold ${accountId}} ] with public key [ {bold ${short(publicKey)}} ] successfully\n`);
-                } else {
-                    console.log(chalk`The account you provided {bold.red [ {bold.white ${accountId}} ] has not authorized the expected key [ {bold.white ${short(publicKey)}} ]}  Please try again.\n`);
-                }
-            } catch (e) {
-                if(/Account ID/.test(e.message)) {
-                    console.log(chalk`\n{bold.red You need to provide a valid account ID to login}. Please try logging in again.\n`);
-                } else if(/does not exist/.test(e.message)) {
-                    console.log(chalk`\nThe account you provided {bold.red [ {bold.white ${accountId}} ] does not exist on the [ {bold.white ${options.networkId}} ] network} (using ${options.nodeUrl})\n`);
-                } else {
-                    console.log(e);
-                }
-            } finally {
-                rl.close();
+        // if we found a suitable URL, attempt to use it
+        if(tempUrl){
+            // open a browser to capture NEAR Wallet callback (and quietly direct the user if open fails)
+            try {
+                newUrl.searchParams.set('success_url', `http://${tempUrl.hostname}:${tempUrl.port}`);
+                await open(newUrl.toString());
+            } catch (error) {
+                console.error(`Failed to open the URL [ ${newUrl.toString()} ]`, error);
             }
-        });
+
+            // capture account_id as provided by NEAR Wallet
+            try {
+                [accountId] = await capture.payload(['account_id'], tempUrl);
+            } catch (error) {
+                console.error('Failed to capture payload.', error.message);
+            }
+        }
+
+        // verify the accountId if we captured it or ...
+        if(accountId) {
+            try {
+                await verify(accountId, keyPair, options);
+            } catch(error) {
+                console.error('Failed to verify accountId.', error.message);
+            }
+        // prompt user to enter it at the terminal if we didn't
+        } else {
+            const rl = readline.createInterface({
+                input: process.stdin,
+                output: process.stdout
+            });
+
+            rl.question(chalk`Please authorize at least one account at the URL above.\n\nWhich account did you authorize for use with NEAR Shell?  {bold Enter it here:} `, async (accountId) => {
+                try {
+                    await verify(accountId, keyPair, options);
+                } catch (error) {
+                    console.error(error);
+                } finally {
+                    rl.close();
+                }
+            });
+        }
     }
 };
 
